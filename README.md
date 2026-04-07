@@ -70,7 +70,7 @@ uvicorn app.main:app --reload
 Run UI:
 
 ```bash
-streamlit run ui/streamlit_app.py
+streamlit run app/streamlit_app.py
 ```
 
 ## Docker

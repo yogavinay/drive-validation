@@ -37,7 +37,7 @@ def main() -> None:
                 "-m",
                 "streamlit",
                 "run",
-                "ui/streamlit_app.py",
+                "app/streamlit_app.py",
                 "--server.address",
                 "127.0.0.1",
                 "--server.port",

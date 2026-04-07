@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-API_BASE = os.getenv("API_BASE", "http://localhost:8000")
+API_BASE = os.getenv("API_BASE", "http://localhost:8000").rstrip("/")
 
 st.set_page_config(page_title="Agentic Validation System", layout="wide")
 st.title("LangGraph Agentic Validation System")
@@ -86,6 +86,16 @@ if "rule_sets" not in st.session_state:
     st.session_state.rule_sets = {}
 if "show_previous_report" not in st.session_state:
     st.session_state.show_previous_report = False
+
+
+def _network_error_message(action: str, exc: Exception) -> str:
+    base = (
+        f"Could not {action} because the backend API is unreachable at `{API_BASE}`.\n\n"
+        "Set `API_BASE` to your deployed backend URL (for Streamlit Cloud, use app Secrets or environment variables)."
+    )
+    if "localhost" in API_BASE or "127.0.0.1" in API_BASE:
+        base += "\n\nCurrent value points to localhost, which is usually not reachable from cloud deployments."
+    return f"{base}\n\nError: {exc}"
 
 
 def render_report(report: dict, title: str = "Validation Report"):
@@ -275,11 +285,26 @@ if col_run.button("Run Validation", type="primary"):
         "max_rules_per_set": int(max_rules_per_set) if fast_mode else None,
         "max_records_per_file": int(max_records_per_file) if fast_mode else None,
     }
-    resp = requests.post(f"{API_BASE}/validate", json=payload, timeout=30)
-    if resp.status_code == 200:
-        st.session_state.job_id = resp.json()["job_id"]
-    else:
-        st.error(resp.text)
+    validate_timeout_sec = int(os.getenv("UI_VALIDATE_TIMEOUT_SEC", "120"))
+    try:
+        # Use split connect/read timeout to tolerate slow backend cold starts.
+        resp = requests.post(
+            f"{API_BASE}/validate",
+            json=payload,
+            timeout=(10, validate_timeout_sec),
+        )
+        if resp.status_code == 200:
+            st.session_state.job_id = resp.json()["job_id"]
+        else:
+            st.error(resp.text)
+    except requests.exceptions.ReadTimeout as exc:
+        st.error(
+            _network_error_message(
+                f"start validation within {validate_timeout_sec}s", exc
+            )
+        )
+    except requests.exceptions.RequestException as exc:
+        st.error(_network_error_message("start validation", exc))
 
 if col_reset.button("Reset"):
     st.session_state.rule_sets = {}
@@ -353,7 +378,11 @@ if "job_id" in st.session_state:
 
     pipeline_status = status.get("pipeline_status")
     if pipeline_status in {"COMPLETED", "FAILED"}:
-        report = requests.get(f"{API_BASE}/report/{st.session_state.job_id}", timeout=30).json()
+        try:
+            report = requests.get(f"{API_BASE}/report/{st.session_state.job_id}", timeout=30).json()
+        except requests.exceptions.RequestException as exc:
+            st.error(_network_error_message("fetch the final report", exc))
+            report = {"summary": {}, "files": [], "errors": [str(exc)]}
         if pipeline_status == "COMPLETED":
             st.success("Validation completed")
         else:
