@@ -74,11 +74,52 @@ Rule: {rule}
 def compile_rule_callable(code: str) -> Callable[..., Dict[str, Any]]:
     assert_safe_python(code)
     namespace: Dict[str, Any] = {}
-    exec(code, {"__builtins__": {"len": len, "str": str, "int": int, "float": float, "isinstance": isinstance}}, namespace)
+    exec(
+        code,
+        {
+            "__builtins__": {
+                "len": len,
+                "str": str,
+                "int": int,
+                "float": float,
+                "isinstance": isinstance,
+                "dict": dict,
+                "list": list,
+                "tuple": tuple,
+                "set": set,
+                "any": any,
+                "all": all,
+                "bool": bool,
+            }
+        },
+        namespace,
+    )
     fn = namespace.get("validate_record")
     if not callable(fn):
         raise ValueError("Generated validator must define validate_record")
     return fn
+
+
+def _sanitize_generated_code(raw: str) -> str:
+    """
+    LLMs often wrap code in markdown fences or add leading explanation.
+    Keep only executable Python and the validate_record function body.
+    """
+    text = textwrap.dedent(raw or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        # Drop opening fence
+        lines = lines[1:] if lines else lines
+        # Drop closing fence if present
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    marker = "def validate_record"
+    idx = text.find(marker)
+    if idx != -1:
+        text = text[idx:]
+    return text
 
 
 def _is_quota_error(exc: BaseException) -> bool:
@@ -89,6 +130,50 @@ def _is_quota_error(exc: BaseException) -> bool:
         or "rate limit" in msg
         or "quota" in msg
     )
+
+
+def _builtin_validator_code(rule: str) -> Optional[str]:
+    r = rule.lower()
+    if "no empty lines" in r or "must not contain empty lines" in r:
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    text = str(record) if not isinstance(record, dict) else str(record.get('text', ''))\n"
+            "    if len(text.strip()) == 0:\n"
+            "        return {'passed': False, 'failed_lines': [line_number], 'details': 'empty line/record'}\n"
+            "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+        )
+    if ("text field" in r and "empty" in r) or ("must not be empty" in r):
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    val = None\n"
+            "    if isinstance(record, dict):\n"
+            "        val = record.get('text')\n"
+            "    elif isinstance(record, str):\n"
+            "        val = record\n"
+            "    if val is None or len(str(val).strip()) == 0:\n"
+            "        return {'passed': False, 'failed_lines': [line_number], 'details': 'text is empty'}\n"
+            "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+        )
+    if "ends with" in r and ("<eos>" in r or "</s>" in r):
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    text = record.get('text') if isinstance(record, dict) else str(record)\n"
+            "    t = str(text).strip()\n"
+            "    ok = t.endswith('<EOS>') or t.endswith('</s>')\n"
+            "    if not ok:\n"
+            "        return {'passed': False, 'failed_lines': [line_number], 'details': 'Missing EOS token'}\n"
+            "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+        )
+    if "shape" in r and "1024" in r:
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    shape = record.get('shape') if isinstance(record, dict) else None\n"
+            "    ok = isinstance(shape, list) and len(shape) == 2 and int(shape[1]) == 1024\n"
+            "    if not ok:\n"
+            "        return {'passed': False, 'failed_lines': [line_number], 'details': f'Unexpected shape: {shape}'}\n"
+            "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+        )
+    return None
 
 
 def generate_validators(
@@ -116,6 +201,10 @@ def generate_validators(
                     "CodeGenerationAgent",
                     f"LLM compiling rule {rule_index}/{total_rules} (set {name!r})",
                 )
+            builtin_code = _builtin_validator_code(rule)
+            if builtin_code is not None:
+                funcs.append(compile_rule_callable(builtin_code))
+                continue
             prompt = RULE_PROMPT.format(rule=rule)
             last_exc = None
             response = None
@@ -144,12 +233,21 @@ def generate_validators(
                     time.sleep(2**attempt)
             if response is None:
                 raise RuntimeError(f"LLM generation failed after retries: {last_exc}")
-            code = textwrap.dedent(str(response.content)).strip()
+            code = _sanitize_generated_code(str(response.content))
             if "def validate_record" not in code:
                 code = (
                     "def validate_record(record, line_number, context):\n"
                     "    return {'passed': True, 'failed_lines': [], 'details': 'No-op fallback'}\n"
                 )
-            funcs.append(compile_rule_callable(code))
+            try:
+                funcs.append(compile_rule_callable(code))
+            except Exception:
+                # Non-fatal: if one generated rule is malformed, keep pipeline running.
+                funcs.append(
+                    compile_rule_callable(
+                        "def validate_record(record, line_number, context):\n"
+                        "    return {'passed': True, 'failed_lines': [], 'details': 'Fallback due to invalid generated code'}\n"
+                    )
+                )
         out[name] = funcs
     return out

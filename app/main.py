@@ -16,6 +16,12 @@ from uuid import uuid4
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+from app.firebase_store import (
+    delete_report_from_firebase,
+    get_report_from_firebase,
+    list_reports_from_firebase,
+    save_report_to_firebase,
+)
 from app.graph_pipeline import run_pipeline
 from app.jobs import read_job_log, read_job_report, read_job_status, write_job_report, write_job_status
 from app.models import ValidationRequest, ValidationState
@@ -86,6 +92,11 @@ async def _run_job(job_id: str, payload: ValidationRequest):
             "errors": [err.model_dump() if hasattr(err, "model_dump") else err for err in final_state.get("errors", [])],
         }
     write_job_report(job_id, report)
+    try:
+        save_report_to_firebase(job_id=job_id, report=report, rule_sets=payload.rule_sets)
+    except Exception:
+        # Non-fatal: local report is still persisted even if remote storage fails.
+        pass
     write_job_status(
         job_id,
         {
@@ -121,3 +132,24 @@ async def report(job_id: str, format: str = "json"):
         pdf = build_pdf(data)
         return Response(content=pdf, media_type="application/pdf")
     return data
+
+
+@app.get("/reports/firebase")
+async def list_firebase_reports(limit: int = 100):
+    return {"items": list_reports_from_firebase(limit=limit)}
+
+
+@app.get("/reports/firebase/{job_id}")
+async def get_firebase_report(job_id: str):
+    item = get_report_from_firebase(job_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Firebase report not found")
+    return item
+
+
+@app.delete("/reports/firebase/{job_id}")
+async def delete_firebase_report(job_id: str):
+    ok = delete_report_from_firebase(job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Firebase report not found or delete failed")
+    return {"status": "deleted", "job_id": job_id}

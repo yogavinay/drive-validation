@@ -12,6 +12,18 @@ import torch
 from app.models import FileManifestItem, FileValidationResult, RuleEvaluation
 
 
+def _rule_applicable(rule_text: str, extension: str) -> bool:
+    r = rule_text.lower()
+    ext = extension.lower()
+    if "shape" in r and "1024" in r:
+        return ext == ".npy"
+    if "state dict" in r or "tensor" in r:
+        return ext == ".pt"
+    if "syntax" in r or "dangerous calls" in r or "ast" in r:
+        return ext == ".py"
+    return True
+
+
 def _iter_records(item: FileManifestItem, max_records: int | None = None):
     path = Path(item.absolute_path)
     ext = item.extension.lower()
@@ -76,6 +88,18 @@ def _run_rules(
 
     for idx, validator in enumerate(validators):
         text = rule_texts[idx] if idx < len(rule_texts) else f"RULE_{idx+1}"
+        if not _rule_applicable(text, item.extension):
+            result.rule_evaluations.append(
+                RuleEvaluation(
+                    rule=text,
+                    status="SKIPPED",
+                    failed_lines=[],
+                    failure_count=0,
+                    total_checked=0,
+                    details=f"Rule not applicable for file type {item.extension}",
+                )
+            )
+            continue
         failed_lines: List[int] = []
         checked = 0
         details = ""
@@ -87,11 +111,11 @@ def _run_rules(
                     failed_lines.extend(outcome.get("failed_lines") or [line_no])
                     details = outcome.get("details", details)
         except Exception as exc:
-            result.status = "INVALID"
+            result.status = "FAILED"
             result.rule_evaluations.append(
                 RuleEvaluation(
                     rule=text,
-                    status="INVALID",
+                    status="FAILED",
                     failed_lines=[],
                     failure_count=1,
                     total_checked=checked,

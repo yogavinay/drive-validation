@@ -38,6 +38,36 @@ class GraphBuilder:
 graph = GraphBuilder()
 
 
+def _match_rule_set(relative_path: str, rule_keys: List[str]) -> str:
+    p = Path(relative_path)
+    parents = [part.upper() for part in p.parts[:-1]]
+    stem = p.stem.upper()
+    name = p.name.upper()
+    suffix = p.suffix.lower()
+
+    if suffix in {".md", ".markdown"} or name.startswith("README"):
+        return "NO_RULE_ASSIGNED"
+
+    # 1) Exact filename stem match (A.jsonl -> A)
+    for key in rule_keys:
+        ku = key.upper()
+        if stem == ku:
+            return key
+
+    # 2) Parent folder name match (B/anything -> B)
+    for key in rule_keys:
+        ku = key.upper()
+        if ku in parents:
+            return key
+
+    # 3) Filename prefix match (SFT_RULES_train.jsonl -> SFT_RULES)
+    for key in rule_keys:
+        ku = key.upper()
+        if stem.startswith(ku + "_") or stem.startswith(ku + "-") or stem == ku:
+            return key
+    return "NO_RULE_ASSIGNED"
+
+
 def _update(state: ValidationState, agent: str, status: str = "RUNNING") -> None:
     state["current_agent"] = agent
     state["pipeline_status"] = status
@@ -146,14 +176,9 @@ def rule_input_system(state: ValidationState) -> ValidationState:
 def rule_matching_agent(state: ValidationState) -> ValidationState:
     _update(state, "RuleMatchingAgent")
     mapping: Dict[str, str] = {}
+    keys = [k.strip() for k in state["rule_sets"].keys() if k.strip()]
     for item in state["downloaded_files"]:
-        stem = Path(item.relative_path).stem.upper()
-        matched = None
-        for key in state["rule_sets"].keys():
-            if stem.startswith(key.upper()) or key.upper() in stem:
-                matched = key
-                break
-        mapping[item.relative_path] = matched or "NO_RULE_ASSIGNED"
+        mapping[item.relative_path] = _match_rule_set(item.relative_path, keys)
     state["file_rule_mapping"] = mapping
     return state
 
@@ -188,10 +213,21 @@ def execution_agent(state: ValidationState) -> ValidationState:
 @graph.node("FileFormatAnalysisAgent")
 def format_analysis_agent(state: ValidationState) -> ValidationState:
     _update(state, "FileFormatAnalysisAgent")
-    state["format_analysis"] = analyze_all_formats(state["downloaded_files"])
-    for rel, analysis in state["format_analysis"].items():
-        if rel in state["execution_results"]:
-            state["execution_results"][rel].format_analysis = analysis
+    try:
+        state["format_analysis"] = analyze_all_formats(state["downloaded_files"])
+        for rel, analysis in state["format_analysis"].items():
+            if rel in state["execution_results"]:
+                state["execution_results"][rel].format_analysis = analysis
+                if analysis.anomalies and state["execution_results"][rel].status == "PASSED":
+                    state["execution_results"][rel].status = "FAILED"
+    except Exception as exc:
+        # Non-fatal: report and continue to final report generation.
+        state["errors"].append(
+            ErrorEntry(
+                agent="FileFormatAnalysisAgent",
+                message=f"Format analysis partially failed: {exc}",
+            )
+        )
     return state
 
 

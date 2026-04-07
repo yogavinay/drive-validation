@@ -12,6 +12,7 @@ requests
 gdown
 numpy
 torch
+firebase-admin
 RestrictedPython
 reportlab
 python-multipart
