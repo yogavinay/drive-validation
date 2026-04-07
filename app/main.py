@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load project-root .env before any code reads os.environ
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from typing import Deque, Dict
+from uuid import uuid4
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+
+from app.graph_pipeline import run_pipeline
+from app.jobs import read_job_log, read_job_report, read_job_status, write_job_report, write_job_status
+from app.models import ValidationRequest, ValidationState
+from app.pdf_report import build_pdf
+
+
+app = FastAPI(title="LangGraph Agentic Validation System", version="1.0.0")
+
+RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "30"))
+
+
+@app.on_event("startup")
+async def startup_event():
+    app.state.request_windows = defaultdict(deque)
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    client = request.client.host if request.client else "unknown"
+    now = datetime.utcnow()
+    window = request.app.state.request_windows[client]
+    while window and window[0] < now - timedelta(minutes=1):
+        window.popleft()
+    if len(window) >= RATE_LIMIT_PER_MIN:
+        return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+    window.append(now)
+    return await call_next(request)
+
+
+async def _run_job(job_id: str, payload: ValidationRequest):
+    state: ValidationState = {
+        "drive_url": payload.drive_url,
+        "access_status": "UNKNOWN",
+        "downloaded_files": [],
+        "rule_sets": payload.rule_sets,
+        "file_rule_mapping": {},
+        "generated_validators": {},
+        "execution_results": {},
+        "format_analysis": {},
+        "final_report": {},
+        "errors": [],
+        "current_agent": "INIT",
+        "pipeline_status": "RUNNING",
+        "llm_provider": payload.llm_provider,
+        "llm_model": payload.llm_model,
+        "job_id": job_id,
+        "fast_mode": payload.fast_mode,
+        "max_rules_per_set": payload.max_rules_per_set,
+        "max_records_per_file": payload.max_records_per_file,
+    }
+    write_job_status(job_id, {"job_id": job_id, "pipeline_status": "RUNNING", "current_agent": "INIT"})
+    final_state = await asyncio.to_thread(run_pipeline, state)
+    report = final_state.get("final_report", {})
+    if not report:
+        report = {
+            "report_id": str(uuid4()),
+            "generated_at": datetime.utcnow().isoformat(),
+            "drive_url": payload.drive_url,
+            "summary": {
+                "total_files": 0,
+                "passed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "overall_pass_rate": "0%",
+                "final_verdict": "FAILED",
+            },
+            "files": [],
+            "errors": [err.model_dump() if hasattr(err, "model_dump") else err for err in final_state.get("errors", [])],
+        }
+    write_job_report(job_id, report)
+    write_job_status(
+        job_id,
+        {
+            "job_id": job_id,
+            "pipeline_status": final_state.get("pipeline_status", "FAILED"),
+            "current_agent": final_state.get("current_agent", "DONE"),
+        },
+    )
+
+
+@app.post("/validate")
+async def validate(request: ValidationRequest, background_tasks: BackgroundTasks):
+    if not request.rule_sets:
+        raise HTTPException(status_code=400, detail="At least one rule set is required")
+    job_id = str(uuid4())
+    background_tasks.add_task(_run_job, job_id, request)
+    return {"job_id": job_id, "status": "RUNNING"}
+
+
+@app.get("/status/{job_id}")
+async def status(job_id: str):
+    state = read_job_status(job_id)
+    state["logs"] = read_job_log(job_id)
+    return state
+
+
+@app.get("/report/{job_id}")
+async def report(job_id: str, format: str = "json"):
+    data = read_job_report(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Report not ready")
+    if format == "pdf":
+        pdf = build_pdf(data)
+        return Response(content=pdf, media_type="application/pdf")
+    return data

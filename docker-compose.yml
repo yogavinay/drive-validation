@@ -1,0 +1,34 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - NVIDIA_BASE_URL=${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      - NVIDIA_MODEL=${NVIDIA_MODEL:-google/gemma-4-31b-it}
+      - LLM_PROVIDER=${LLM_PROVIDER:-nvidia}
+      - RATE_LIMIT_PER_MIN=30
+      - VALIDATION_JOBS_DIR=/tmp/staging/jobs
+    volumes:
+      - ./:/app
+
+  ui:
+    build: .
+    command: streamlit run ui/streamlit_app.py --server.address=0.0.0.0 --server.port=8501
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE=http://api:8000
+      - LLM_PROVIDER=${LLM_PROVIDER:-nvidia}
+      - LLM_MODEL=${LLM_MODEL:-google/gemma-4-31b-it}
+      - NVIDIA_MODEL=${NVIDIA_MODEL:-google/gemma-4-31b-it}
+    depends_on:
+      - api
+    volumes:
+      - ./:/app
