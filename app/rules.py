@@ -16,13 +16,34 @@ from app.security import assert_safe_python
 DEFAULT_NVIDIA_MODEL = "google/gemma-4-31b-it"
 
 
+def _llm_request_timeout() -> Optional[float]:
+    """Per-request HTTP timeout for LLM calls (important on Render / slow NVIDIA models)."""
+    raw = os.getenv("LLM_REQUEST_TIMEOUT_SEC", "900").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def build_llm(provider: str, model: str):
+    timeout = _llm_request_timeout()
+    openai_timeout_kw: Dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
+
     if provider == "openai":
-        return ChatOpenAI(model=model, temperature=0)
+        return ChatOpenAI(model=model, temperature=0, **openai_timeout_kw)
     if provider == "anthropic":
-        return ChatAnthropic(model=model, temperature=0)
+        # LangChain passes this through to the Anthropic client as request timeout.
+        kw: Dict[str, Any] = {}
+        if timeout is not None:
+            kw["default_request_timeout"] = timeout
+        return ChatAnthropic(model=model, temperature=0, **kw)
     if provider == "gemini":
-        return ChatGoogleGenerativeAI(model=model, temperature=0)
+        kw: Dict[str, Any] = {}
+        if timeout is not None:
+            kw["timeout"] = timeout
+        return ChatGoogleGenerativeAI(model=model, temperature=0, **kw)
     if provider == "nvidia":
         # Same API as: POST https://integrate.api.nvidia.com/v1/chat/completions (OpenAI-compatible)
         api_key = os.getenv("NVIDIA_API_KEY")
@@ -48,6 +69,8 @@ def build_llm(provider: str, model: str):
             params["top_p"] = float(top_p)
         if extra_body:
             params["extra_body"] = extra_body
+        if timeout is not None:
+            params["timeout"] = timeout
         return ChatOpenAI(**params)
     raise ValueError(f"Unsupported provider: {provider}")
 
