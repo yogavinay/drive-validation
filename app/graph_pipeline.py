@@ -191,7 +191,7 @@ def code_generation_agent(state: ValidationState) -> ValidationState:
         provider=state["llm_provider"],
         model=state["llm_model"],
         job_id=state["job_id"],
-        fast_mode=state.get("fast_mode", False),
+        fast_mode=state.get("fast_mode", True),
         max_rules_per_set=state.get("max_rules_per_set"),
     )
     return state

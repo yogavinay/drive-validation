@@ -188,26 +188,22 @@ with st.sidebar:
     )
     llm_model = st.text_input("Model name", value=_model_default)
 
-    st.subheader("Fast Mode (Approximate)")
-    fast_mode = st.checkbox(
-        "Enable fast mode",
-        value=bool(os.getenv("FAST_MODE_DEFAULT", "false").lower() in ("1", "true", "yes")),
-        help="Compile fewer rules and sample fewer records per file for quicker feedback.",
-    )
+    st.subheader("Fast mode (always on)")
+    st.caption("Uses fewer rules per set and caps records per file for quicker runs.")
     max_rules_per_set = st.number_input(
-        "Max rules per rule set (fast mode)",
+        "Max rules per rule set",
         min_value=1,
         max_value=20,
         value=int(os.getenv("FAST_MAX_RULES_PER_SET", "2")),
         step=1,
     )
     max_records_per_file = st.number_input(
-        "Max records per file (fast mode)",
+        "Max records per file",
         min_value=100,
         max_value=100000,
         value=int(os.getenv("FAST_MAX_RECORDS_PER_FILE", "5000")),
         step=100,
-        help="For .txt/.jsonl/.json files, only this many records will be validated in fast mode.",
+        help="For .txt/.jsonl/.json files, only this many records are validated per file.",
     )
     st.divider()
     st.subheader("Live Monitoring")
@@ -301,9 +297,9 @@ if col_run.button("Run Validation", type="primary"):
         "rule_sets": st.session_state.rule_sets,
         "llm_provider": llm_provider,
         "llm_model": llm_model,
-        "fast_mode": fast_mode,
-        "max_rules_per_set": int(max_rules_per_set) if fast_mode else None,
-        "max_records_per_file": int(max_records_per_file) if fast_mode else None,
+        "fast_mode": True,
+        "max_rules_per_set": int(max_rules_per_set),
+        "max_records_per_file": int(max_records_per_file),
     }
     validate_timeout_sec = int(os.getenv("UI_VALIDATE_TIMEOUT_SEC", "120"))
     try:

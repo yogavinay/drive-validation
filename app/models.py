@@ -67,8 +67,8 @@ class ValidationRequest(BaseModel):
     rule_sets: Dict[str, List[str]]
     llm_provider: Literal["openai", "anthropic", "gemini", "nvidia"] = "openai"
     llm_model: str = "gpt-4o"
-    # Fast mode: approximate / quick validation
-    fast_mode: bool = False
+    # Fast mode: approximate / quick validation (default on for API consumers)
+    fast_mode: bool = True
     max_rules_per_set: Optional[int] = None
     max_records_per_file: Optional[int] = None
 
