@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Deque, Dict
 from uuid import uuid4
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.firebase_store import (
@@ -110,11 +110,17 @@ async def _run_job(job_id: str, payload: ValidationRequest):
 
 
 @app.post("/validate")
-async def validate(request: ValidationRequest, background_tasks: BackgroundTasks):
+async def validate(request: ValidationRequest):
     if not request.rule_sets:
         raise HTTPException(status_code=400, detail="At least one rule set is required")
     job_id = str(uuid4())
-    background_tasks.add_task(_run_job, job_id, request)
+    # Persist an immediate status so /status never appears as UNKNOWN.
+    write_job_status(
+        job_id,
+        {"job_id": job_id, "pipeline_status": "RUNNING", "current_agent": "INIT"},
+    )
+    # Render can be flaky with response-bound background tasks; schedule directly.
+    asyncio.create_task(_run_job(job_id, request))
     return {"job_id": job_id, "status": "RUNNING"}
 
 
