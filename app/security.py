@@ -24,6 +24,21 @@ def validate_drive_url(url: str) -> Tuple[bool, str]:
     # Accept folder-style links.
     if not re.search(r"/drive/folders/|/folders/", url) and not re.search(r"[?&]id=", url):
         return False, "URL must point to a Drive folder share link"
+    m = re.search(r"/(?:drive/)?folders/([a-zA-Z0-9_-]+)", url)
+    if m:
+        fid = m.group(1)
+        if fid.upper() in {
+            "YOUR_FOLDER_ID",
+            "YOURFOLDERID",
+            "FOLDER_ID",
+            "REPLACE_ME",
+            "EXAMPLE",
+        }:
+            return (
+                False,
+                "Drive URL still contains a placeholder folder id. Copy the real link from Drive "
+                "(Share → Anyone with the link) and paste the full URL.",
+            )
     return True, ""
 
 
