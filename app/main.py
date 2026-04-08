@@ -33,6 +33,30 @@ app = FastAPI(title="LangGraph Agentic Validation System", version="1.0.0")
 RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "30"))
 
 
+def _apply_fast_mode_policy(request: ValidationRequest) -> ValidationRequest:
+    """
+    Enforce fast validation on the server so old Streamlit/API clients cannot
+    accidentally send fast_mode=false and trigger many slow LLM compilations.
+    Set FORCE_FAST_MODE=false to allow full mode.
+    """
+    raw = os.getenv("FORCE_FAST_MODE", "true").strip().lower()
+    if raw in ("0", "false", "no"):
+        return request
+    mrs = request.max_rules_per_set
+    mrf = request.max_records_per_file
+    if mrs is None:
+        mrs = int(os.getenv("FAST_MAX_RULES_PER_SET", "2"))
+    if mrf is None:
+        mrf = int(os.getenv("FAST_MAX_RECORDS_PER_FILE", "5000"))
+    return request.model_copy(
+        update={
+            "fast_mode": True,
+            "max_rules_per_set": mrs,
+            "max_records_per_file": mrf,
+        },
+    )
+
+
 @app.on_event("startup")
 async def startup_event():
     app.state.request_windows = defaultdict(deque)
@@ -113,6 +137,7 @@ async def _run_job(job_id: str, payload: ValidationRequest):
 async def validate(request: ValidationRequest):
     if not request.rule_sets:
         raise HTTPException(status_code=400, detail="At least one rule set is required")
+    request = _apply_fast_mode_policy(request)
     job_id = str(uuid4())
     # Persist an immediate status so /status never appears as UNKNOWN.
     write_job_status(

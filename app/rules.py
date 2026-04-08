@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 import os
 import textwrap
 import time
@@ -54,7 +56,8 @@ def build_llm(provider: str, model: str):
         max_tokens = int(os.getenv("NVIDIA_MAX_TOKENS", "16384"))
         temperature = float(os.getenv("NVIDIA_TEMPERATURE", "0"))
         top_p = os.getenv("NVIDIA_TOP_P")
-        thinking = os.getenv("NVIDIA_ENABLE_THINKING", "true").lower() in ("1", "true", "yes")
+        # Thinking mode greatly slows code-gen on NVIDIA NIM; default off for cloud latency.
+        thinking = os.getenv("NVIDIA_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
         extra_body: Dict[str, Any] = {}
         if thinking:
             extra_body["chat_template_kwargs"] = {"enable_thinking": True}
@@ -113,6 +116,8 @@ def compile_rule_callable(code: str) -> Callable[..., Dict[str, Any]]:
                 "any": any,
                 "all": all,
                 "bool": bool,
+                "json": json,
+                "ast": ast,
             }
         },
         namespace,
@@ -196,6 +201,27 @@ def _builtin_validator_code(rule: str) -> Optional[str]:
             "        return {'passed': False, 'failed_lines': [line_number], 'details': f'Unexpected shape: {shape}'}\n"
             "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
         )
+    if "valid json" in r or ("must be valid" in r and "json" in r):
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    if isinstance(record, dict):\n"
+            "        return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+            "    s = str(record).strip()\n"
+            "    try:\n"
+            "        json.loads(s)\n"
+            "        return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+            "    except Exception:\n"
+            "        return {'passed': False, 'failed_lines': [line_number], 'details': 'invalid JSON'}\n"
+        )
+    if ("syntax" in r and "python" in r) or "syntax errors" in r:
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    try:\n"
+            "        ast.parse(str(record))\n"
+            "        return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+            "    except SyntaxError as e:\n"
+            "        return {'passed': False, 'failed_lines': [line_number], 'details': str(e)}\n"
+        )
     return None
 
 
@@ -218,16 +244,22 @@ def generate_validators(
                 # Skip remaining rules in this set in fast/approximate mode.
                 break
             rule_index += 1
+            builtin_code = _builtin_validator_code(rule)
+            if builtin_code is not None:
+                if job_id:
+                    update_job_progress(
+                        job_id,
+                        "CodeGenerationAgent",
+                        f"Builtin rule {rule_index}/{total_rules} (set {name!r})",
+                    )
+                funcs.append(compile_rule_callable(builtin_code))
+                continue
             if job_id:
                 update_job_progress(
                     job_id,
                     "CodeGenerationAgent",
                     f"LLM compiling rule {rule_index}/{total_rules} (set {name!r})",
                 )
-            builtin_code = _builtin_validator_code(rule)
-            if builtin_code is not None:
-                funcs.append(compile_rule_callable(builtin_code))
-                continue
             prompt = RULE_PROMPT.format(rule=rule)
             last_exc = None
             response = None
