@@ -13,7 +13,11 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-API_BASE = os.getenv("API_BASE", "http://localhost:8000").rstrip("/")
+API_BASE = (
+    os.getenv("API_BASE")
+    or os.getenv("API_URL")
+    or "http://localhost:8000"
+).rstrip("/")
 
 st.set_page_config(page_title="Agentic Validation System", layout="wide")
 st.title("LangGraph Agentic Validation System")
@@ -86,6 +90,10 @@ if "rule_sets" not in st.session_state:
     st.session_state.rule_sets = {}
 if "show_previous_report" not in st.session_state:
     st.session_state.show_previous_report = False
+if "firebase_history" not in st.session_state:
+    st.session_state.firebase_history = []
+if "history_load_attempted" not in st.session_state:
+    st.session_state.history_load_attempted = False
 
 
 def _network_error_message(action: str, exc: Exception) -> str:
@@ -215,13 +223,25 @@ with st.sidebar:
     st.divider()
     st.subheader("Previous Validations")
     if st.button("Load validation history"):
+        st.session_state.history_load_attempted = True
         try:
-            rows = requests.get(f"{API_BASE}/reports/firebase?limit=100", timeout=30).json().get("items", [])
-            st.session_state.firebase_history = rows
-        except Exception:
+            resp = requests.get(f"{API_BASE}/reports/firebase?limit=100", timeout=30)
+            if resp.status_code != 200:
+                st.session_state.firebase_history = []
+                st.error(f"Could not load history: {resp.status_code} {resp.text}")
+            else:
+                rows = resp.json().get("items", [])
+                st.session_state.firebase_history = rows
+                if rows:
+                    st.success(f"Loaded {len(rows)} previous report(s).")
+                else:
+                    st.info("No previous reports found yet.")
+        except requests.exceptions.RequestException as exc:
             st.session_state.firebase_history = []
-            st.warning("Could not fetch Firebase history. Check FIREBASE_DATABASE_URL.")
+            st.warning(_network_error_message("load previous validations", exc))
     history = st.session_state.get("firebase_history", [])
+    if st.session_state.get("history_load_attempted") and not history:
+        st.caption("History list is currently empty.")
     if history:
         st.caption("Owner: TEAM")
         all_sets = sorted({s for item in history for s in item.get("set_names", [])})

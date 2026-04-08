@@ -36,6 +36,8 @@ RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "30"))
 @app.on_event("startup")
 async def startup_event():
     app.state.request_windows = defaultdict(deque)
+    if not os.getenv("FIREBASE_DATABASE_URL", "").strip():
+        print("WARN: FIREBASE_DATABASE_URL is not set; Firebase report history is disabled.")
 
 
 @app.middleware("http")
