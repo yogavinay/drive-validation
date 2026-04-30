@@ -23,7 +23,16 @@ def analyze_file_format(item: FileManifestItem) -> FormatAnalysisResult:
             result.anomalies.append("Empty file")
             return result
 
-        if ext in {".txt", ".jsonl", ".json", ".py"}:
+        # ── Text-based files: encoding / BOM / line-endings ──
+        _text_exts = {
+            ".txt", ".jsonl", ".json", ".py", ".csv", ".tsv", ".xml", ".yaml", ".yml",
+            ".md", ".markdown", ".html", ".htm", ".css", ".scss", ".less",
+            ".log", ".out", ".err", ".sh", ".bat", ".ps1", ".sql", ".lua", ".pl", ".php",
+            ".js", ".ts", ".jsx", ".tsx", ".java", ".cpp", ".c", ".h", ".cs", ".go",
+            ".rs", ".rb", ".swift", ".kt", ".r", ".scala",
+            ".toml", ".ini", ".cfg", ".env", ".conf", ".properties", ".svg",
+        }
+        if ext in _text_exts:
             with open(path, "rb") as handle:
                 raw = handle.read()
             result.has_bom = raw.startswith(b"\xef\xbb\xbf")
@@ -36,6 +45,7 @@ def analyze_file_format(item: FileManifestItem) -> FormatAnalysisResult:
             else:
                 result.line_endings = "LF"
 
+        # ── JSONL ──
         if ext == ".jsonl":
             keys = None
             total = 0
@@ -58,6 +68,7 @@ def analyze_file_format(item: FileManifestItem) -> FormatAnalysisResult:
             result.total_records = total
             if result.schema_consistent is None:
                 result.schema_consistent = True
+
         elif ext == ".json":
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as handle:
@@ -70,6 +81,64 @@ def analyze_file_format(item: FileManifestItem) -> FormatAnalysisResult:
                     f"Malformed JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
                 )
                 return result
+
+        elif ext in {".csv", ".tsv"}:
+            import csv
+            delimiter = "\t" if ext == ".tsv" else ","
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+                    reader = csv.reader(handle, delimiter=delimiter)
+                    headers = None
+                    total = 0
+                    for row_idx, row in enumerate(reader, start=1):
+                        if row_idx == 1:
+                            headers = row
+                            result.metadata["columns"] = headers
+                            continue
+                        total += 1
+                        if headers and len(row) != len(headers):
+                            result.anomalies.append(f"Row {row_idx} has {len(row)} columns, expected {len(headers)}")
+                    result.total_records = total
+                    result.schema_consistent = len(result.anomalies) == 0
+            except Exception as exc:
+                result.anomalies.append(f"CSV parse error: {exc}")
+
+        elif ext in {".yaml", ".yml"}:
+            try:
+                import yaml
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    payload = yaml.safe_load(handle)
+                result.total_records = len(payload) if isinstance(payload, list) else 1
+                result.schema_consistent = True
+                result.metadata["type"] = type(payload).__name__
+            except Exception as exc:
+                result.anomalies.append(f"YAML parse error: {exc}")
+                result.schema_consistent = False
+
+        elif ext == ".xml":
+            try:
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(path)
+                root = tree.getroot()
+                result.metadata["root_tag"] = root.tag
+                result.metadata["child_count"] = len(root)
+                result.total_records = len(root)
+                result.schema_consistent = True
+            except Exception as exc:
+                result.anomalies.append(f"XML parse error: {exc}")
+                result.schema_consistent = False
+
+        elif ext == ".parquet":
+            try:
+                import pandas as pd
+                df = pd.read_parquet(path)
+                result.total_records = len(df)
+                result.metadata["columns"] = list(df.columns)
+                result.metadata["dtypes"] = {col: str(dt) for col, dt in df.dtypes.items()}
+                result.schema_consistent = True
+            except Exception as exc:
+                result.anomalies.append(f"Parquet read error: {exc}")
+
         elif ext == ".npy":
             arr = np.load(path, mmap_mode="r")
             result.metadata["shape"] = list(arr.shape)
@@ -78,11 +147,13 @@ def analyze_file_format(item: FileManifestItem) -> FormatAnalysisResult:
                 result.anomalies.append("Contains NaN values")
             if np.isinf(arr).any():
                 result.anomalies.append("Contains Inf values")
-        elif ext == ".pt":
+
+        elif ext in {".pt", ".pth"}:
             obj = torch.load(path, map_location="cpu")
             if isinstance(obj, dict):
                 result.metadata["state_dict_keys"] = list(obj.keys())[:100]
             result.metadata["object_type"] = str(type(obj))
+
         elif ext == ".py":
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 content = handle.read()
@@ -106,6 +177,20 @@ def analyze_file_format(item: FileManifestItem) -> FormatAnalysisResult:
             result.metadata["imports"] = imports
             result.metadata["functions"] = functions
             result.metadata["syntax_ok"] = True
+
+        elif ext in {".md", ".markdown", ".html", ".htm", ".log", ".out", ".err"}:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+            result.total_records = content.count("\n") + 1
+            result.metadata["char_count"] = len(content)
+            result.metadata["word_count"] = len(content.split())
+
+        else:
+            # Binary or unknown — just report size
+            stat = path.stat()
+            result.metadata["size_bytes"] = stat.st_size
+            result.metadata["type"] = ext.lstrip(".")
+
         return result
     except Exception as exc:
         result.anomalies.append(f"Format analysis error: {exc}")

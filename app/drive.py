@@ -23,7 +23,31 @@ _DRIVE_REQUEST_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-SUPPORTED_EXTENSIONS = {".jsonl", ".json", ".txt", ".py", ".npy", ".pt"}
+SUPPORTED_EXTENSIONS = {
+    # Data formats
+    ".jsonl", ".json", ".txt", ".csv", ".tsv", ".xml", ".yaml", ".yml",
+    ".parquet", ".arrow", ".feather",
+    # Code / scripts
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".cpp", ".c", ".h",
+    ".cs", ".go", ".rs", ".rb", ".swift", ".kt", ".r", ".scala",
+    ".sh", ".bat", ".ps1", ".sql", ".lua", ".pl", ".php",
+    # Config / markup
+    ".md", ".markdown", ".html", ".htm", ".css", ".scss", ".less",
+    ".toml", ".ini", ".cfg", ".env", ".conf", ".properties",
+    # Documents
+    ".pdf", ".docx", ".xlsx", ".pptx", ".rtf",
+    # ML / scientific
+    ".npy", ".npz", ".pt", ".pth", ".safetensors", ".gguf", ".onnx",
+    ".tflite", ".h5", ".hdf5", ".pkl", ".pickle",
+    # Media (metadata only)
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp",
+    ".wav", ".mp3", ".flac", ".ogg",
+    ".mp4", ".avi", ".mkv", ".mov", ".webm",
+    # Archives
+    ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+    # Logs
+    ".log", ".out", ".err",
+}
 
 
 def extract_drive_folder_id(url: str) -> Optional[str]:

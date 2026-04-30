@@ -162,7 +162,13 @@ def file_classifier_agent(state: ValidationState) -> ValidationState:
     _update(state, "FileClassifierAgent")
     for item in state["downloaded_files"]:
         ext = item.extension.lower()
-        item.file_type = ext.lstrip(".") if ext in SUPPORTED_EXTENSIONS else "UNSUPPORTED"
+        if ext in SUPPORTED_EXTENSIONS:
+            item.file_type = ext.lstrip(".")
+        elif ext:
+            # Accept any extension — classify by extension name
+            item.file_type = ext.lstrip(".")
+        else:
+            item.file_type = "UNKNOWN"
     return state
 
 

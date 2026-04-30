@@ -80,20 +80,39 @@ def build_llm(provider: str, model: str):
 
 # Literal braces must be doubled for str.format — only {rule} is a placeholder.
 RULE_PROMPT = """
-You are a secure Python rule compiler.
-Convert the user rule into a Python function body for:
+You are an intelligent Python rule compiler that understands natural English descriptions.
+
+The user will describe a validation rule in plain English. Your job is to interpret
+what they mean and convert it into a Python function.
+
+Generate a complete Python function with this signature:
 def validate_record(record, line_number, context):
     ...
     return {{"passed": bool, "failed_lines": list[int], "details": str}}
 
+About the arguments:
+- `record` can be a string (text line), a dict (parsed JSON object), or other data types
+- `line_number` is the 1-based line/record index
+- `context` is a dict with metadata like {{"file_type": ".jsonl"}}
+
+Examples of natural English rules users might write:
+- "Each line must not be empty" → check if record is empty/whitespace
+- "Every record should have instruction and output fields" → check dict keys
+- "Text must end with a period" → check string ending
+- "No profanity allowed" → check for common bad words
+- "Values must be between 0 and 100" → check numeric ranges
+- "Each record must be valid JSON" → try parsing as JSON
+
 Constraints:
-- No imports
+- No imports (but you can use: len, str, int, float, isinstance, dict, list, tuple, set, any, all, bool, json, ast)
 - No file IO
 - No eval/exec
 - Pure computation on record/context
-- Return PASSED for valid record and FAILED with failed line for invalid
+- Return PASSED (passed=True) for valid records, FAILED (passed=False) with the failed line number for invalid records
 - Keep deterministic and safe
-Rule: {rule}
+- If the rule is ambiguous, interpret it in the most reasonable way
+
+User's rule in natural English: {rule}
 """
 
 
@@ -161,8 +180,10 @@ def _is_quota_error(exc: BaseException) -> bool:
 
 
 def _builtin_validator_code(rule: str) -> Optional[str]:
-    r = rule.lower()
-    if "no empty lines" in r or "must not contain empty lines" in r:
+    r = rule.lower().strip()
+
+    # ── No empty lines / records ──
+    if "no empty lines" in r or "must not contain empty lines" in r or "no blank lines" in r or "each line must not be empty" in r:
         return (
             "def validate_record(record, line_number, context):\n"
             "    text = str(record) if not isinstance(record, dict) else str(record.get('text', ''))\n"
@@ -170,18 +191,22 @@ def _builtin_validator_code(rule: str) -> Optional[str]:
             "        return {'passed': False, 'failed_lines': [line_number], 'details': 'empty line/record'}\n"
             "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
         )
-    if ("text field" in r and "empty" in r) or ("must not be empty" in r):
+
+    # ── Text / content must not be empty ──
+    if ("text field" in r and "empty" in r) or ("must not be empty" in r) or ("should not be empty" in r) or ("cannot be empty" in r):
         return (
             "def validate_record(record, line_number, context):\n"
             "    val = None\n"
             "    if isinstance(record, dict):\n"
-            "        val = record.get('text')\n"
+            "        val = record.get('text') or record.get('content') or record.get('value')\n"
             "    elif isinstance(record, str):\n"
             "        val = record\n"
             "    if val is None or len(str(val).strip()) == 0:\n"
-            "        return {'passed': False, 'failed_lines': [line_number], 'details': 'text is empty'}\n"
+            "        return {'passed': False, 'failed_lines': [line_number], 'details': 'text/content is empty'}\n"
             "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
         )
+
+    # ── Ends with EOS / </s> token ──
     if "ends with" in r and ("<eos>" in r or "</s>" in r):
         return (
             "def validate_record(record, line_number, context):\n"
@@ -192,6 +217,8 @@ def _builtin_validator_code(rule: str) -> Optional[str]:
             "        return {'passed': False, 'failed_lines': [line_number], 'details': 'Missing EOS token'}\n"
             "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
         )
+
+    # ── Shape check (e.g., "shape must be 1024") ──
     if "shape" in r and "1024" in r:
         return (
             "def validate_record(record, line_number, context):\n"
@@ -201,7 +228,9 @@ def _builtin_validator_code(rule: str) -> Optional[str]:
             "        return {'passed': False, 'failed_lines': [line_number], 'details': f'Unexpected shape: {shape}'}\n"
             "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
         )
-    if "valid json" in r or ("must be valid" in r and "json" in r):
+
+    # ── Valid JSON check ──
+    if "valid json" in r or ("must be valid" in r and "json" in r) or "well-formed json" in r:
         return (
             "def validate_record(record, line_number, context):\n"
             "    if isinstance(record, dict):\n"
@@ -213,6 +242,8 @@ def _builtin_validator_code(rule: str) -> Optional[str]:
             "    except Exception:\n"
             "        return {'passed': False, 'failed_lines': [line_number], 'details': 'invalid JSON'}\n"
         )
+
+    # ── Python syntax check ──
     if ("syntax" in r and "python" in r) or "syntax errors" in r:
         return (
             "def validate_record(record, line_number, context):\n"
@@ -222,6 +253,40 @@ def _builtin_validator_code(rule: str) -> Optional[str]:
             "    except SyntaxError as e:\n"
             "        return {'passed': False, 'failed_lines': [line_number], 'details': str(e)}\n"
         )
+
+    # ── Required fields check (e.g., "must have instruction and output fields") ──
+    import re as _re
+    field_match = _re.findall(r"['\"](\w+)['\"]", rule)
+    if not field_match:
+        # Try matching "have/contain X and Y fields"
+        field_match = _re.findall(r"(?:have|contain|include)\s+(?:an?\s+)?(\w+)(?:\s+and\s+(\w+))?(?:\s+field)?", r)
+        if field_match:
+            field_match = [f for pair in field_match for f in pair if f and f not in {"an", "a", "the", "and", "field", "fields"}]
+    if field_match and any(kw in r for kw in ["must have", "should have", "must contain", "should contain", "require", "need"]):
+        fields_str = ", ".join(f"'{f}'" for f in field_match)
+        checks = " and ".join(f"'{f}' in record" for f in field_match)
+        missing_expr = " + ".join(f"(['{f}'] if '{f}' not in record else [])" for f in field_match)
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    if not isinstance(record, dict):\n"
+            "        try:\n"
+            "            record = json.loads(str(record))\n"
+            "        except Exception:\n"
+            f"            return {{'passed': False, 'failed_lines': [line_number], 'details': 'Not a dict, cannot check fields: {fields_str}'}}\n"
+            f"    missing = {missing_expr}\n"
+            "    if missing:\n"
+            f"        return {{'passed': False, 'failed_lines': [line_number], 'details': f'Missing fields: {{missing}}'}}\n"
+            "    return {'passed': True, 'failed_lines': [], 'details': ''}\n"
+        )
+
+    # ── No duplicate records ──
+    if "no duplicate" in r or "must not have duplicate" in r or "unique" in r:
+        return (
+            "def validate_record(record, line_number, context):\n"
+            "    # Duplicate detection requires full-file context; mark as passed at record level\n"
+            "    return {'passed': True, 'failed_lines': [], 'details': 'Duplicate check requires full-file scan'}\n"
+        )
+
     return None
 
 

@@ -12,27 +12,54 @@ import torch
 from app.models import FileManifestItem, FileValidationResult, RuleEvaluation
 
 
+# Text-readable extensions (read line-by-line or as full text)
+_TEXT_EXTENSIONS = {
+    ".txt", ".jsonl", ".md", ".markdown", ".html", ".htm", ".css", ".scss", ".less",
+    ".log", ".out", ".err", ".sh", ".bat", ".ps1", ".sql", ".lua", ".pl", ".php",
+    ".js", ".ts", ".jsx", ".tsx", ".java", ".cpp", ".c", ".h", ".cs", ".go",
+    ".rs", ".rb", ".swift", ".kt", ".r", ".scala", ".toml", ".ini", ".cfg",
+    ".env", ".conf", ".properties", ".xml", ".svg",
+}
+
+# Binary extensions where we only yield metadata
+_BINARY_METADATA_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+    ".wav", ".mp3", ".flac", ".ogg",
+    ".mp4", ".avi", ".mkv", ".mov", ".webm",
+    ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+    ".pdf", ".docx", ".xlsx", ".pptx", ".rtf",
+    ".safetensors", ".gguf", ".onnx", ".tflite",
+    ".h5", ".hdf5", ".pkl", ".pickle", ".npz",
+    ".feather", ".arrow",
+}
+
+
 def _rule_applicable(rule_text: str, extension: str) -> bool:
     r = rule_text.lower()
     ext = extension.lower()
+    # Only skip rules that explicitly target a specific file type mismatch
     if "shape" in r and "1024" in r:
         return ext == ".npy"
     if "state dict" in r or "tensor" in r:
-        return ext == ".pt"
-    if "syntax" in r or "dangerous calls" in r or "ast" in r:
+        return ext in {".pt", ".pth", ".safetensors"}
+    if ("syntax" in r and "python" in r) or ("dangerous calls" in r) or ("ast" in r and "parse" in r):
         return ext == ".py"
+    # For all other natural English rules, apply to all file types
     return True
 
 
 def _iter_records(item: FileManifestItem, max_records: int | None = None):
     path = Path(item.absolute_path)
     ext = item.extension.lower()
-    if ext in {".txt", ".jsonl"}:
+
+    # ── JSONL / TXT and other text-line formats ──
+    if ext in _TEXT_EXTENSIONS:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             for idx, line in enumerate(handle, start=1):
                 if max_records is not None and idx > max_records:
                     break
                 yield idx, line.rstrip("\n")
+
     elif ext == ".json":
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             payload = json.load(handle)
@@ -43,21 +70,84 @@ def _iter_records(item: FileManifestItem, max_records: int | None = None):
                 yield idx, entry
         else:
             yield 1, payload
+
+    elif ext in {".csv", ".tsv"}:
+        import csv
+        delimiter = "\t" if ext == ".tsv" else ","
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            for idx, row in enumerate(reader, start=1):
+                if max_records is not None and idx > max_records:
+                    break
+                yield idx, dict(row)
+
+    elif ext in {".yaml", ".yml"}:
+        try:
+            import yaml
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                payload = yaml.safe_load(handle)
+            if isinstance(payload, list):
+                for idx, entry in enumerate(payload, start=1):
+                    if max_records is not None and idx > max_records:
+                        break
+                    yield idx, entry
+            else:
+                yield 1, payload
+        except Exception:
+            # Fall back to reading as text
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for idx, line in enumerate(handle, start=1):
+                    if max_records is not None and idx > max_records:
+                        break
+                    yield idx, line.rstrip("\n")
+
+    elif ext == ".parquet":
+        try:
+            import pandas as pd
+            df = pd.read_parquet(path)
+            for idx, row in enumerate(df.to_dict("records"), start=1):
+                if max_records is not None and idx > max_records:
+                    break
+                yield idx, row
+        except Exception:
+            yield 1, {"type": "parquet", "error": "Could not read parquet file"}
+
     elif ext == ".npy":
         arr = np.load(path, mmap_mode="r")
         yield 1, {"shape": list(arr.shape), "dtype": str(arr.dtype), "has_nan": bool(np.isnan(arr).any())}
-    elif ext == ".pt":
+
+    elif ext in {".pt", ".pth"}:
         obj = torch.load(path, map_location="cpu")
         if isinstance(obj, dict):
             yield 1, {"keys": list(obj.keys())[:100], "type": "state_dict"}
         else:
             yield 1, {"type": str(type(obj))}
+
     elif ext == ".py":
         content = path.read_text(encoding="utf-8", errors="replace")
         ast.parse(content)
         yield 1, content
+
+    elif ext in _BINARY_METADATA_EXTENSIONS:
+        # For binary files, yield basic metadata
+        stat = path.stat()
+        yield 1, {
+            "type": ext.lstrip("."),
+            "size_bytes": stat.st_size,
+            "file_name": path.name,
+        }
+
     else:
-        return
+        # Unknown extension — try reading as text, fall back to metadata
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for idx, line in enumerate(handle, start=1):
+                    if max_records is not None and idx > max_records:
+                        break
+                    yield idx, line.rstrip("\n")
+        except Exception:
+            stat = path.stat()
+            yield 1, {"type": ext.lstrip("."), "size_bytes": stat.st_size}
 
 
 def _run_rules(

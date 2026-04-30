@@ -106,8 +106,75 @@ def _network_error_message(action: str, exc: Exception) -> str:
     return f"{base}\n\nError: {exc}"
 
 
+def _status_badge(status: str) -> str:
+    """Return an HTML span with color-coded status text."""
+    colors = {"PASSED": "#2ecc71", "FAILED": "#e74c3c", "SKIPPED": "#95a5a6", "INVALID": "#e74c3c"}
+    color = colors.get(status, "#95a5a6")
+    return f'<span style="color:{color};font-weight:700;font-size:14px;">{status}</span>'
+
+
+def _format_failed_lines(failed_lines: list, max_show: int = 10) -> str:
+    """Format failed line numbers for display."""
+    if not failed_lines:
+        return "All lines valid"
+    if len(failed_lines) <= max_show:
+        return "Line " + ", ".join(str(ln) for ln in failed_lines)
+    return "Line " + ", ".join(str(ln) for ln in failed_lines[:max_show]) + f" ... (+{len(failed_lines) - max_show} more)"
+
+
+# Shared CSS for report tables
+REPORT_TABLE_CSS = """
+<style>
+.report-section { margin-bottom: 28px; }
+.report-section h3 {
+    font-size: 18px; font-weight: 700; color: #1a2332 !important;
+    margin-bottom: 10px; padding-bottom: 6px;
+    border-bottom: 2px solid #2c8c99;
+}
+.report-table {
+    width: 100%; border-collapse: collapse;
+    border-radius: 8px; overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    margin-bottom: 18px;
+}
+.report-table thead th {
+    background: #2c8c99; color: #ffffff !important;
+    padding: 12px 18px; text-align: center;
+    font-weight: 600; font-size: 14px;
+    letter-spacing: 0.3px;
+}
+.report-table tbody td {
+    padding: 10px 18px; text-align: center;
+    border-bottom: 1px solid #e8ecef;
+    font-size: 13px; color: #333 !important;
+    background: #ffffff;
+}
+.report-table tbody tr:nth-child(even) td {
+    background: #f7fafa;
+}
+.report-table tbody tr:hover td {
+    background: #edf6f7;
+}
+.verdict-card {
+    background: #fef9f0; border-left: 4px solid #e8a838;
+    padding: 16px 24px; border-radius: 6px;
+    margin-top: 12px; margin-bottom: 20px;
+}
+.verdict-card .label {
+    font-weight: 700; font-size: 14px; color: #1a2332 !important;
+    display: inline-block; min-width: 140px;
+}
+.verdict-card .value-passed { color: #2ecc71; font-weight: 700; font-size: 16px; }
+.verdict-card .value-failed { color: #e74c3c; font-weight: 700; font-size: 16px; font-style: italic; }
+.verdict-card .value-rate { color: #e8a838; font-weight: 700; font-size: 16px; font-style: italic; }
+</style>
+"""
+
+
 def render_report(report: dict, title: str = "Validation Report"):
     st.subheader(title)
+    st.markdown(REPORT_TABLE_CSS, unsafe_allow_html=True)
+
     summary = report.get("summary", {})
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Files", summary.get("total_files", 0))
@@ -117,16 +184,138 @@ def render_report(report: dict, title: str = "Validation Report"):
     c5.metric("Pass Rate", summary.get("overall_pass_rate", "0%"))
 
     if report.get("errors"):
-        st.subheader("Errors")
-        st.json(report.get("errors", []))
+        with st.expander("⚠️ Errors", expanded=False):
+            for err in report.get("errors", []):
+                if isinstance(err, dict):
+                    reason = err.get("reason") or err.get("message") or str(err)
+                    agent = err.get("agent", "")
+                    st.error(f"**{agent}**: {reason}" if agent else reason)
+                else:
+                    st.error(str(err))
 
     for file_result in report.get("files", []):
-        badge = file_result.get("status", "SKIPPED")
-        color = {"PASSED": "green", "FAILED": "red", "SKIPPED": "gray", "INVALID": "red"}.get(badge, "gray")
-        with st.expander(f"{file_result.get('file_name')} [{badge}]"):
-            st.markdown(f"**Status:** :{color}[{badge}]")
-            st.json(file_result.get("rule_evaluations", []))
-            st.json(file_result.get("format_analysis", {}))
+        file_name = file_result.get("file_name", "Unknown")
+        file_type = file_result.get("file_type", "unknown")
+        matched_set = file_result.get("matched_rule_set", "N/A")
+        file_status = file_result.get("status", "SKIPPED")
+        badge_color = {"PASSED": "🟢", "FAILED": "🔴", "SKIPPED": "⚪", "INVALID": "🔴"}.get(file_status, "⚪")
+
+        with st.expander(f"{badge_color} {file_name}  —  {file_status}", expanded=(file_status == "FAILED")):
+            # ── File-Level Summary Table ──
+            summary_html = f"""
+            <div class="report-section">
+                <h3>File-Level Summary</h3>
+                <table class="report-table">
+                    <thead><tr><th>Field</th><th>Value</th></tr></thead>
+                    <tbody>
+                        <tr><td>File</td><td>{file_name}</td></tr>
+                        <tr><td>Type</td><td>{file_type}</td></tr>
+                        <tr><td>Matched Rule Set</td><td>{matched_set}</td></tr>
+                        <tr><td>Status</td><td>{_status_badge(file_status)}</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            """
+            st.markdown(summary_html, unsafe_allow_html=True)
+
+            # ── Rule Evaluation Table ──
+            rule_evals = file_result.get("rule_evaluations", [])
+            if rule_evals:
+                rows_html = ""
+                passed_count = 0
+                total_rules = len(rule_evals)
+                for rule_eval in rule_evals:
+                    rule_name = rule_eval.get("rule", "Unknown Rule")
+                    rule_status = rule_eval.get("status", "SKIPPED")
+                    failed_lines = rule_eval.get("failed_lines", [])
+                    details = rule_eval.get("details", "")
+                    if rule_status == "PASSED":
+                        passed_count += 1
+                        detail_text = "All lines valid"
+                    elif rule_status == "SKIPPED":
+                        detail_text = details or "Skipped"
+                    else:
+                        detail_text = _format_failed_lines(failed_lines) if failed_lines else (details or "Failed")
+                    rows_html += f"""
+                        <tr>
+                            <td>{rule_name}</td>
+                            <td>{_status_badge(rule_status)}</td>
+                            <td>{detail_text}</td>
+                        </tr>
+                    """
+
+                eval_html = f"""
+                <div class="report-section">
+                    <h3>Rule Evaluation</h3>
+                    <table class="report-table">
+                        <thead><tr><th>Rule</th><th>Status</th><th>Details</th></tr></thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                </div>
+                """
+                st.markdown(eval_html, unsafe_allow_html=True)
+
+                # ── Final Verdict Card ──
+                pass_rate = f"{(passed_count / total_rules * 100):.0f}%" if total_rules else "0%"
+                verdict_class = "value-passed" if file_status == "PASSED" else "value-failed"
+                verdict_html = f"""
+                <div class="report-section">
+                    <h3>Final Verdict</h3>
+                    <div class="verdict-card">
+                        <div style="margin-bottom:6px;">
+                            <span class="label">Overall Status:</span>
+                            <span class="{verdict_class}">{file_status}</span>
+                        </div>
+                        <div>
+                            <span class="label">Pass Rate:</span>
+                            <span class="value-rate">{pass_rate}</span>
+                        </div>
+                    </div>
+                </div>
+                """
+                st.markdown(verdict_html, unsafe_allow_html=True)
+
+            # ── Format Analysis (collapsible, non-JSON) ──
+            fmt = file_result.get("format_analysis")
+            if fmt and isinstance(fmt, dict):
+                has_data = any(v for k, v in fmt.items() if v and v != [] and v != {})
+                if has_data:
+                    fmt_rows = ""
+                    label_map = {
+                        "schema_consistent": "Schema Consistent",
+                        "encoding": "Encoding",
+                        "line_endings": "Line Endings",
+                        "has_bom": "Has BOM",
+                        "total_records": "Total Records",
+                        "missing_keys": "Missing Keys",
+                        "anomalies": "Anomalies",
+                    }
+                    for key, label in label_map.items():
+                        val = fmt.get(key)
+                        if val is None or val == [] or val == {}:
+                            continue
+                        if isinstance(val, list):
+                            val = ", ".join(str(v) for v in val) if val else "None"
+                        elif isinstance(val, bool):
+                            val = "Yes" if val else "No"
+                        fmt_rows += f"<tr><td>{label}</td><td>{val}</td></tr>"
+                    # Include metadata if present
+                    meta = fmt.get("metadata", {})
+                    if meta:
+                        for mk, mv in meta.items():
+                            display_val = str(mv) if not isinstance(mv, list) else ", ".join(str(x) for x in mv[:20])
+                            fmt_rows += f"<tr><td>{mk}</td><td>{display_val}</td></tr>"
+                    if fmt_rows:
+                        fmt_html = f"""
+                        <div class="report-section">
+                            <h3>Format Analysis</h3>
+                            <table class="report-table">
+                                <thead><tr><th>Property</th><th>Value</th></tr></thead>
+                                <tbody>{fmt_rows}</tbody>
+                            </table>
+                        </div>
+                        """
+                        st.markdown(fmt_html, unsafe_allow_html=True)
 
     json_bytes = json.dumps(report, indent=2).encode("utf-8")
     b1, b2 = st.columns(2)
@@ -150,16 +339,25 @@ with st.sidebar:
         else:
             st.error("Invalid Drive link")
     with st.form("add_rule_set_form", clear_on_submit=True):
-        rule_set_name = st.text_input("Rule Set Name", placeholder="Example: A or SFT_RULES")
-        rules_text = st.text_area("Rules (one per line)", height=140, placeholder="Example:\nNo empty lines\nEnds with <EOS>")
-        submitted = st.form_submit_button("Add Rule Set")
+        rule_set_name = st.text_input(
+            "Rule Set Name",
+            placeholder="e.g. A, SFT_RULES, MyDataset",
+            help="Name to match files — files named 'A.jsonl' match rule set 'A'",
+        )
+        rules_text = st.text_area(
+            "Rules (plain English, one per line)",
+            height=160,
+            placeholder="Write rules in natural English. Examples:\nEach line must not be empty\nEvery record should have an 'instruction' and 'output' field\nText must end with a period or question mark\nNo duplicate entries allowed\nJSON must be valid and well-formed\nFile should not contain profanity or offensive language",
+            help="Write your validation rules in plain English. The AI agent will understand and generate the appropriate validation logic automatically.",
+        )
+        submitted = st.form_submit_button("➕ Add Rule Set")
         if submitted:
             rules = [line.strip() for line in rules_text.splitlines() if line.strip()]
             if rule_set_name and rules:
                 st.session_state.rule_sets[rule_set_name] = rules
-                st.success(f"✅ Rule Set '{rule_set_name}' added successfully! You can add another rule set.")
+                st.success(f"✅ Rule Set '{rule_set_name}' added with {len(rules)} rule(s)!")
             else:
-                st.warning("⚠️ Both rule set name and rules are required.")
+                st.warning("⚠️ Both rule set name and at least one rule are required.")
     st.subheader("Rule Set Preview")
     for key, rules in list(st.session_state.rule_sets.items()):
         st.write(f"**{key}**")
